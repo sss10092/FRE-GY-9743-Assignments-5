@@ -13,19 +13,36 @@ from fixedincomelib.valuation import (
 class ValuationEngineProductFixedAccrued(ValuationEngineProduct):
     def __init__(self, model, valuation_parameters_collection, product, request):
         super().__init__(model, valuation_parameters_collection, product, request)
-        # TODO 
-        raise NotImplementedError("TODO 3")
+        funding_parameter = valuation_parameters_collection.get_vp_from_build_method_collection(
+            FundingIndexParameter._vp_type)
+        self.funding_index_ = funding_parameter.get_funding_index(product.currency)
+        self.cash_amount_ = product.notional * product.accrued
 
     def calculate_value(self) -> None:
-        # TODO Set self.value_ and self.cash_ for past, same-day, and future payments.
-        raise NotImplementedError("TODO 4")
+        payment_date = self.product_.payment_date
+        if payment_date < self.value_date:
+            self.value_, self.cash_ = 0.0, 0.0
+        elif payment_date == self.value_date:
+            self.value_, self.cash_ = self.cash_amount_, self.cash_amount_
+        else:
+            df = self.model.discount_factor(
+                self.funding_index_, payment_date, self.product_.currency.value_str)
+            self.value_, self.cash_ = self.cash_amount_ * df, 0.0
 
     def calculate_risk(
         self, gradient: list[np.ndarray], scaler: float = 1.0, accumulate: bool = False,
     ) -> None:
-        # TODO Write product risk using the model's DF gradient; non-future payments have zero risk.
-        # Apply scaler to the new contribution; overwrite or add according to accumulate.
-        raise NotImplementedError("TODO 5")
+        payment_date = self.product_.payment_date
+        if payment_date > self.value_date:
+            self.model.discount_factor_gradient_wrt_state(
+                self.funding_index_, payment_date, gradient,
+                scaler=scaler * self.cash_amount_, accumulate=accumulate)
+            return
+        # Past or same-day payments have zero risk.
+        self.model.resize_gradient(gradient)
+        if not accumulate:
+            for block in gradient:
+                block[:] = 0.0
 
 
 ValuationEngineProductRegistry().register(

@@ -90,8 +90,35 @@ class YieldCurve(Model):
         """Write raw DF derivatives into component-ordered blocks in place."""
         # TODO 2: Follow the reference chain recursively and apply the product rule.
         # Use the model helpers; scale the new contribution and overwrite or accumulate.
-        raise NotImplementedError("TODO 2")
+        self.resize_gradient(gradient_vector)
+        if not accumulate:
+            for block in gradient_vector:
+                block[:] = 0.0
 
+        visited = set()
+
+        def recurse(component_index, outer_scaler):
+            component = self.retrieve_model_component(component_index)
+            identifier = component.component_identifier
+            name = identifier.name()
+            if name in visited:
+                raise ValueError(f"Circular yield-curve reference: {name}")
+            visited.add(name)
+
+            reference_index = getattr(identifier, "reference_index", None)
+            reference_df = 1.0
+            if reference_index is not None:
+                reference_df = self.discount_factor(reference_index, expiry_date)
+
+            # d(D_local * D_ref) = D_ref * dD_local + D_local * dD_ref
+            block = gradient_vector[self.retrieve_model_component_index(component_index)]
+            component.discount_factor_gradient_wrt_state(
+                expiry_date, block, outer_scaler * reference_df, accumulate=True)
+
+            if reference_index is not None:
+                recurse(reference_index, outer_scaler * component.discount_factor(expiry_date))
+
+        recurse(index, scaler)
 
 class YieldCurveModelComponent(ModelComponent):
 
@@ -159,10 +186,20 @@ class YieldCurveModelComponent(ModelComponent):
         self, expiry_date: Date, gradient_vector: np.ndarray,
         scaler: float = 1.0, accumulate: bool = False,
     ) -> None:
-        """Write raw local DF derivatives into the supplied array in place."""
-        # TODO 1: Calculate the local DF gradient using the interpolator's integral gradient.
-        # Apply scaler to the new contribution; overwrite or add according to accumulate.
-        raise NotImplementedError("TODO 1")
+        if expiry_date.serialNumber() == 0:
+            raise ValueError("A valid discount-factor date is required.")
+        if expiry_date < self.value_date:
+            raise ValueError("Discount-factor date cannot precede the model value date.")
+
+        time_to_expiry = accrued(self.value_date, expiry_date)
+        integral_gradient = self.state_data_interpolator.gradient_of_integrated_value_wrt_ordinate(
+            0.0, time_to_expiry)
+        # D = exp(-integral)  =>  dD/dy = -D * d(integral)/dy
+        local = -self.discount_factor(expiry_date) * integral_gradient * scaler
+        if accumulate:
+            gradient_vector += local
+        else:
+            gradient_vector[:] = local
 
 
 ModelDeserializerRegistry().register(YieldCurve._model_type.to_string(), YieldCurve.deserialize)
